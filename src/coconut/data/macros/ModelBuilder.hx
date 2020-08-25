@@ -34,8 +34,8 @@ class ModelBuilder {
 
   var patchType:ComplexType;
 
-  static var OPTIONAL = [{ name: ':optional', pos: (macro null).pos, params: [] }];
-  static var NOMETA = OPTIONAL.slice(OPTIONAL.length);
+  static final OPTIONAL = [{ name: ':optional', pos: (macro null).pos, params: [] }];
+  static final NOMETA = OPTIONAL.slice(OPTIONAL.length);
   static inline var TRANSITION = ':transition';
 
   public function new(c, ctor) {
@@ -161,25 +161,30 @@ class ModelBuilder {
 
     constr.publish();
 
-    if (!isInterface && !c.target.meta.has(':tink'))
-      c.target.meta.add(':tink', [], (macro null).pos);
-
     {
-      var transform = tink.SyntaxHub.exprLevel.appliedTo(c).force();
-      for (f in this.init)
-        constr.init(f.name, f.expr.pos, Value(transform(f.expr)));
-    }
-    constr.init('__coco_transitionCount', (macro null).pos, Value(macro new tink.state.State(0)), {bypass: true});
-    constr.init('errorTrigger', (macro null).pos, Value(macro tink.core.Signal.trigger()), {bypass: true});
-    constr.init('transitionErrors', (macro null).pos, Value(macro errorTrigger), {bypass: true});
+      var transform =
+        switch #if tink_syntaxhub tink.SyntaxHub.exprLevel.appliedTo(c) #else None #end {
+          case Some(f): f;
+          default: e -> e;
+        }
 
+      for (f in this.init)
+        constr.init(f.name, f.expr.pos, Value(macro @:pos(f.expr.pos) coconut.data.macros.Helper.untracked(${transform(f.expr)})));
+    }
+    constr.init('__coco_transitionCount', (macro null).pos, Value(macro new tink.state.State(0)));
+    constr.init('errorTrigger', (macro null).pos, Value(macro tink.core.Signal.trigger()));
+    constr.init('transitionErrors', (macro null).pos, Value(macro errorTrigger));
+    constr.init('annex', (macro null).pos, Value(macro new coconut.data.helpers.Annex(this)));
     {
       var observables = TAnonymous(observableFields);
-      constr.init('observables', (macro null).pos, Value(macro (${EObjectDecl(observableInit).at()} : $observables)), { bypass: true });
+      constr.init('observables', (macro null).pos, Value(macro (${EObjectDecl(observableInit).at()} : $observables)));
     }
 
-    for (s in afterInit)
-      constr.addStatement(s);
+    if (afterInit.length > 0)
+      constr.addStatement(macro tink.state.Observable.untracked(function () {
+        $b{afterInit};
+        return null;
+      }));
   }
 
   function addBoilerPlate() {
@@ -188,12 +193,7 @@ class ModelBuilder {
 
     for (f in patchFields) {
       var name = f.name;
-      var cond =
-        if (#if haxe4 true #else !Context.defined('python')#end)
-          macro existent.$name;
-        else
-          macro Reflect.hasField(existent, $v{name});
-      updates.push(macro if ($cond) $i{stateOf(name)}.set(delta.$name));
+      updates.push(macro if (existent.$name) $i{stateOf(name)}.set(delta.$name));
     }
 
     observableFields.push({
@@ -242,10 +242,10 @@ class ModelBuilder {
       var _updatePerformed:tink.core.Signal.SignalTrigger<$patchType> = tink.core.Signal.trigger();
       public var updatePerformed(get, never):tink.core.Signal<$patchType>;
         function get_updatePerformed() return _updatePerformed;
-      public var observables(default, never):$observables;
-      public var transitionErrors(default, never):tink.core.Signal<tink.core.Error>;
-      @:noCompletion var errorTrigger(default, never):tink.core.Signal.SignalTrigger<tink.core.Error>;
-      @:noCompletion var __coco_transitionCount(default, never):tink.state.State<Int>;
+      public final observables:$observables;
+      public final transitionErrors:tink.core.Signal<tink.core.Error>;
+      @:noCompletion final errorTrigger:tink.core.Signal.SignalTrigger<tink.core.Error>;
+      @:noCompletion final __coco_transitionCount:tink.state.State<Int>;
       public var isInTransition(get, never):Bool;
       @:noCompletion inline function get_isInTransition() return __coco_transitionCount.value > 0;
     }).fields;
@@ -254,13 +254,18 @@ class ModelBuilder {
       if (f.isPublic || !isInterface)
         c.addMember(f);
 
-    if (!isInterface)
+    if (!isInterface) {
       c.addMembers(macro class {
-        public var annex(default, never):coconut.data.helpers.Annex<$self> = new coconut.data.helpers.Annex<$self>(this);
-        public function toString():String {
-          return $v{c.target.name};//TODO: consider adding fields
-        }
+        public final annex:coconut.data.helpers.Annex<$self>;
       });
+
+      if (!c.hasMember('toString'))
+        c.addMembers(macro class {
+          public function toString():String {
+            return $v{c.target.name};//TODO: consider adding fields
+          }
+        });
+    }
   }
 
   static function stateOf(name:String)
@@ -438,6 +443,7 @@ class ModelBuilder {
       var getter = 'get_$name',
           get = switch kind {
             case KConstant:
+              f.addMeta(':isVar', (macro null).pos);
               macro @:pos(f.pos) $i{name};
             default:
               var type =
@@ -596,8 +602,11 @@ class ModelBuilder {
     var builder = new ClassBuilder(fields);
 
     new ModelBuilder(builder, ctor);
+    #if hotswap
+      hotswap.Macro.lazify(builder);
+    #end
 
-    return builder.export();
+    return builder.export(builder.target.meta.has(':explain'));
   }
 }
 #end
